@@ -1,0 +1,410 @@
+# GitLab CI for the Nornir → NetBox import (net2sot/).
+#
+# Three ways to use it:
+#
+# 1. Import a NEW DEVICE on demand — run a pipeline (web UI "Run pipeline",
+#    trigger token, or API) and set the inputs declared in `spec:` below.
+#
+#    Example API trigger. TRIGGER_TOKEN must be a *pipeline trigger token*
+#    (Settings → CI/CD → Pipeline trigger tokens); a personal access token
+#    is rejected here with a bare 404.
+#
+#      curl -X POST \
+#        -F "token=$TRIGGER_TOKEN" \
+#        -F "ref=main" \
+#        -F "inputs[device_name]=pe-emea-01" \
+#        -F "inputs[device_ip]=172.20.20.11" \
+#        -F "inputs[device_platform]=ios" \
+#        -F "inputs[site_name]=lab" \
+#        -F "inputs[device_role]=edge" \
+#        "https://gitlab.example.com/api/v4/projects/<project-id>/trigger/pipeline"
+#
+#    With a personal access token, use the pipeline endpoint instead:
+#
+#      curl -X POST \
+#        -H "PRIVATE-TOKEN: $GITLAB_PAT" \
+#        -H "Content-Type: application/json" \
+#        -d '{"ref":"main","inputs":{"device_name":"pe-emea-01",
+#             "device_ip":"172.20.20.11","device_platform":"ios",
+#             "site_name":"lab","device_role":"edge"}}' \
+#        "https://gitlab.example.com/api/v4/projects/<project-id>/pipeline"
+#
+#    Both need this `spec:` header present on the ref being triggered,
+#    otherwise the API rejects the call with:
+#      "Given inputs not defined in the `spec` section"
+#
+# 2. RE-DISCOVER devices already in NetBox (`--from-netbox`), reached at their
+#    primary IP. This is the CI equivalent of:
+#
+#      uv run discovery.py --from-netbox --filter-site datacenter-1
+#
+#    The filters can be given two ways, and BOTH work on the same job:
+#
+#      a) as pipeline inputs — compile-time, validated against `spec:`:
+#
+#           curl -X POST \
+#             -F "token=$TRIGGER_TOKEN" \
+#             -F "ref=main" \
+#             -F "inputs[filter_site]=datacenter-1" \
+#             "https://gitlab.example.com/api/v4/projects/<project-id>/trigger/pipeline"
+#
+#      b) as CI/CD variables — runtime, so they also work from a pipeline
+#         schedule or from "Run pipeline" without touching the inputs form:
+#
+#           curl -X POST \
+#             -F "token=$TRIGGER_TOKEN" \
+#             -F "ref=main" \
+#             -F "variables[FILTER_SITE]=datacenter-1" \
+#             "https://gitlab.example.com/api/v4/projects/<project-id>/trigger/pipeline"
+#
+#    An input wins over the variable of the same name when both are set, since
+#    the input is the more explicit, per-run choice.
+#
+#    Every filter takes a SPACE-SEPARATED list, matching the script's `nargs="*"`
+#    (e.g. filter_site="lab prod", FILTER_DEVICE="pe-emea-01 pe-emea-02").
+#    Filters combine as an AND across kinds and an OR within one kind.
+#    With no filter at all, `from_netbox=true` / `FROM_NETBOX=true` re-discovers
+#    the ENTIRE NetBox inventory — set a filter unless that is really the intent.
+#
+# 3. Import the FULL static inventory (inventory/hosts.yaml) — manual job
+#    on regular pipelines.
+#
+# Required CI/CD variables (Settings → CI/CD → Variables, masked):
+#   NETBOX_URL        NetBox base URL
+#   NETBOX_TOKEN      NetBox API token
+#   DEVICE_USERNAME   SSH username for the network devices
+#   DEVICE_PASSWORD   SSH password for the network devices
+#
+# These override settings.yaml (discovery.py ENV_SETTINGS), so the checked-in
+# settings.yaml never needs to carry a real token. NETBOX_URL and NETBOX_TOKEN
+# are enforced by a preflight check on every `import`-stage job — see the
+# comment on it in `default.before_script` for why an unset URL is dangerous
+# rather than merely inconvenient.
+#
+# NOTE: the runner needs network reachability to both NetBox and the
+# devices' management IPs.
+#
+# NOTE: the GitLab host and project ID in the URLs above are placeholders.
+# Use your own — Settings → General shows the project ID.
+#
+# Troubleshooting: "Failed to resolve '<some-other-host>'" with a host you did
+# not configure means NETBOX_URL was not set, so the run fell back to the
+# netbox_url committed in net2sot/settings.yaml. Set the variable.
+
+spec:
+  inputs:
+    device_name:
+      type: string
+      default: ""
+      description: "Device to import. Leave empty for a regular lint pipeline."
+    device_ip:
+      type: string
+      default: ""
+      description: "Management IP / hostname. Required with device_name."
+    device_platform:
+      type: string
+      default: "ios"
+      options: ["ios", "eos", "iosxr", "nxos", "srlinux", "linux"]
+      description: "Driver platform for the device (inventory/groups.yaml)."
+    site_name:
+      type: string
+      default: ""
+      description: "Override the site from settings.yaml."
+    device_role:
+      type: string
+      default: ""
+      description: "NetBox role for the device(s)."
+    collector:
+      type: string
+      default: ""
+      options: ["", "napalm", "scrapli", "netmiko"]
+      description: >-
+        Collector backend. Empty uses the per-group default, falling back to
+        settings.yaml. Groups that pin a backend (srlinux → netmiko) ignore it.
+
+    # ── NetBox-sourced re-discovery (--from-netbox) ──────────────────────
+    # Declared as strings rather than `type: array` so the same value can also
+    # arrive as a CI/CD variable, which is always a plain string.
+    from_netbox:
+      type: string
+      default: "false"
+      options: ["false", "true"]
+      description: >-
+        Re-discover devices sourced from NetBox instead of inventory/hosts.yaml.
+        Implied by any filter_* below, so only needed to re-discover EVERYTHING.
+    filter_site:
+      type: string
+      default: ""
+      description: "Re-discovery: site slug(s), space-separated. e.g. datacenter-1"
+    filter_location:
+      type: string
+      default: ""
+      description: "Re-discovery: location slug(s), space-separated."
+    filter_platform:
+      type: string
+      default: ""
+      description: "Re-discovery: platform slug(s), space-separated."
+    filter_device:
+      type: string
+      default: ""
+      description: "Re-discovery: device name(s), space-separated (case-insensitive)."
+    netbox_branch:
+      type: string
+      default: ""
+      description: >-
+        Apply all NetBox reads/writes inside this existing netbox-branching
+        branch instead of committing to main. Review and merge it in NetBox.
+---
+stages:
+  - lint
+  - import
+
+default:
+  image: python:3.12-slim
+  before_script:
+    # discovery.py only creates RAW_DATA_PATH once a device has been
+    # collected, so a run that dies before that (bad credentials,
+    # unreachable device) leaves nothing to upload and the artifact step
+    # fails with "no matching files". Create it up front and tee the run
+    # log into it, so a failed job still ships the reason it failed.
+    - mkdir -p "$RAW_DATA_PATH"
+    - |
+      # Preflight, before the dependency install so a misconfigured pipeline
+      # fails in seconds rather than after a minute of setup.
+      #
+      # settings.yaml is checked in with a placeholder netbox_url, and
+      # load_settings() only overrides it when NETBOX_URL is exported. So an
+      # unset NETBOX_URL does not fail — it silently aims the run at whatever
+      # host happens to be committed. In a fork that points settings.yaml at a
+      # real instance, that is how a pipeline ends up writing to the wrong
+      # NetBox: the reachable-but-wrong case is worse than the unreachable one,
+      # because it succeeds. Demand the variable explicitly in CI.
+      #
+      # CI_JOB_STAGE is a predefined variable, so this gates on the real stage
+      # and cannot be flipped by a stray project-level variable.
+      if [ "$CI_JOB_STAGE" = "import" ]; then
+        missing=""
+        [ -n "${NETBOX_URL:-}" ]   || missing="$missing NETBOX_URL"
+        [ -n "${NETBOX_TOKEN:-}" ] || missing="$missing NETBOX_TOKEN"
+        if [ -n "$missing" ]; then
+          {
+            echo "ERROR: missing required CI/CD variable(s):$missing"
+            echo
+            echo "Set them under Settings → CI/CD → Variables (masked, and"
+            echo "protected only if this ref is protected), then re-run."
+            # Only worth saying when the URL itself is the one missing —
+            # otherwise it misdescribes a run that had the target right.
+            if [ -z "${NETBOX_URL:-}" ]; then
+              echo
+              echo "Without NETBOX_URL the run falls back to the netbox_url"
+              echo "committed in net2sot/settings.yaml, which is a"
+              echo "placeholder and almost certainly not what you want."
+            fi
+          } | tee -a "$RAW_DATA_PATH/discovery.log" >&2
+          exit 1
+        fi
+        # Device credentials legitimately fall back to inventory/defaults.yaml
+        # (the example lab credentials), so this is a warning and not a
+        # failure — a real device will just reject the login.
+        if [ -z "${DEVICE_USERNAME:-}" ] || [ -z "${DEVICE_PASSWORD:-}" ]; then
+          echo "WARNING: DEVICE_USERNAME/DEVICE_PASSWORD unset — falling back to inventory/defaults.yaml." \
+            | tee -a "$RAW_DATA_PATH/discovery.log"
+        fi
+        echo "NetBox target: $NETBOX_URL" | tee -a "$RAW_DATA_PATH/discovery.log"
+      fi
+    - pip install --quiet --upgrade pip uv
+    # --locked fails the job if uv.lock has drifted from pyproject.toml,
+    # rather than silently resolving a different dependency set than the
+    # one that was tested.
+    - uv sync --locked --quiet
+  cache:
+    key: uv-cache
+    paths:
+      - .cache/uv
+
+variables:
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+  # Discovery reports/raw data land here and are kept as artifacts
+  RAW_DATA_PATH: "$CI_PROJECT_DIR/discovery_output"
+
+workflow:
+  rules:
+    # On-demand device import (API trigger, web "Run pipeline", schedules)
+    - if: '$CI_PIPELINE_SOURCE =~ /^(api|trigger|web|pipeline|schedule)$/'
+    # Regular CI on pushes and merge requests
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# The "is this a re-discovery pipeline?" test is spelled out in each job rather
+# than shared through a YAML anchor: `rules` must be a flat list, and an aliased
+# sequence splices in as a nested one. `!reference` would flatten correctly, but
+# the lint job parses this file with yaml.safe_load, which rejects custom tags.
+#
+# Concatenating the four filter inputs into one string is the compile-time way
+# to ask "was ANY filter given?" without repeating four comparisons. The
+# variable-side checks use the bare `$VAR` form on purpose: `$VAR != ""` is true
+# for an *undefined* variable in GitLab's rule engine, which would make every
+# pipeline look like a re-discovery request.
+
+# ── Lint: sanity-check the code and YAML on every push/MR ────────────
+lint:
+  stage: lint
+  rules:
+    - if: '"$[[ inputs.device_name ]]" != ""'
+      when: never
+    - if: '"$[[ inputs.from_netbox ]]" == "true"'
+      when: never
+    - if: '"$[[ inputs.filter_site ]]$[[ inputs.filter_location ]]$[[ inputs.filter_platform ]]$[[ inputs.filter_device ]]" != ""'
+      when: never
+    - if: '$FROM_NETBOX == "true" || $FILTER_SITE || $FILTER_LOCATION || $FILTER_PLATFORM || $FILTER_DEVICE'
+      when: never
+    - when: on_success
+  script:
+    - uv run python -m compileall -q net2sot
+    - uv run python -c "import yaml, glob; [list(yaml.safe_load_all(open(f))) for f in glob.glob('net2sot/**/*.yaml', recursive=True) + ['.gitlab-ci.yml']]"
+    # The normalization helpers decide what every device looks like in NetBox,
+    # so they are the one thing worth failing a pipeline over. No device or
+    # NetBox needed.
+    - uv run --extra dev python -m pytest tests/ -q
+    - uv run --extra dev ruff check net2sot tests examples
+    - cd net2sot && uv run python discovery.py --help
+
+# ── Import a single new device (triggered with device_* inputs) ──────
+import:new-device:
+  stage: import
+  rules:
+    - if: '"$[[ inputs.device_name ]]" != "" && "$[[ inputs.device_ip ]]" != ""'
+  script:
+    - cd net2sot
+    - |
+      # pipefail: without it `tee` returns 0 and a failed import goes green.
+      set -o pipefail
+      # Inputs are bound as shell assignments, NOT job `variables:` — a
+      # project-level CI/CD variable (Settings → CI/CD → Variables) silently
+      # overrides YAML job variables, so a leftover DEVICE_NAME there would
+      # replace whatever was typed into the pipeline form. Interpolation
+      # happens at pipeline compile time; nothing can override these.
+      DEVICE_NAME="$[[ inputs.device_name ]]"
+      DEVICE_IP="$[[ inputs.device_ip ]]"
+      DEVICE_PLATFORM="$[[ inputs.device_platform ]]"
+      SITE_NAME="$[[ inputs.site_name ]]"
+      DEVICE_ROLE="$[[ inputs.device_role ]]"
+      COLLECTOR="$[[ inputs.collector ]]"
+      uv run python discovery.py \
+        --device-name "$DEVICE_NAME" \
+        --device-ip "$DEVICE_IP" \
+        --device-platform "$DEVICE_PLATFORM" \
+        ${SITE_NAME:+--site-name "$SITE_NAME"} \
+        ${DEVICE_ROLE:+--device-role "$DEVICE_ROLE"} \
+        ${COLLECTOR:+--collector "$COLLECTOR"} \
+        --save-raw 2>&1 | tee -a "$RAW_DATA_PATH/discovery.log"
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - discovery_output/
+
+# ── Re-discover devices already in NetBox (--from-netbox) ────────────
+# Runs when any filter_* input, or any FILTER_* / FROM_NETBOX variable, is set.
+# Also offered as a manual job on the default branch, so a re-discovery can be
+# started from the pipeline page with variables and no trigger token.
+rediscover:from-netbox:
+  stage: import
+  rules:
+    # An ad-hoc import and a re-discovery are mutually exclusive in the script
+    # (--from-netbox rejects --device-name), so never start both in one pipeline.
+    - if: '"$[[ inputs.device_name ]]" != ""'
+      when: never
+    - if: '"$[[ inputs.from_netbox ]]" == "true"'
+    - if: '"$[[ inputs.filter_site ]]$[[ inputs.filter_location ]]$[[ inputs.filter_platform ]]$[[ inputs.filter_device ]]" != ""'
+    - if: '$FROM_NETBOX == "true" || $FILTER_SITE || $FILTER_LOCATION || $FILTER_PLATFORM || $FILTER_DEVICE'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: true
+  script:
+    - cd net2sot
+    - |
+      # pipefail: without it `tee` returns 0 and a failed run goes green.
+      set -o pipefail
+      # noglob: the filter values below are deliberately expanded UNQUOTED so a
+      # space-separated list becomes several argv entries for nargs="*". Slugs
+      # never contain glob characters, but disabling globbing means a stray "*"
+      # can't quietly expand against the runner's working directory.
+      set -f
+
+      # Inputs are bound at compile time; the CI/CD variable of the same name is
+      # the runtime fallback. Two names per filter, because assigning straight to
+      # FILTER_SITE would clobber the variable before it could be read.
+      IN_SITE="$[[ inputs.filter_site ]]"
+      IN_LOCATION="$[[ inputs.filter_location ]]"
+      IN_PLATFORM="$[[ inputs.filter_platform ]]"
+      IN_DEVICE="$[[ inputs.filter_device ]]"
+      IN_COLLECTOR="$[[ inputs.collector ]]"
+      IN_BRANCH="$[[ inputs.netbox_branch ]]"
+
+      SITE="${IN_SITE:-$FILTER_SITE}"
+      LOCATION="${IN_LOCATION:-$FILTER_LOCATION}"
+      PLATFORM="${IN_PLATFORM:-$FILTER_PLATFORM}"
+      DEVICE="${IN_DEVICE:-$FILTER_DEVICE}"
+      COLLECTOR="${IN_COLLECTOR:-$COLLECTOR_BACKEND}"
+      BRANCH="${IN_BRANCH:-$NETBOX_BRANCH}"
+
+      # An unfiltered run touches every device in NetBox. It is a legitimate
+      # request, but loud enough to deserve a line in the log.
+      if [ -z "$SITE$LOCATION$PLATFORM$DEVICE" ]; then
+        echo "WARNING: no filter given — re-discovering the ENTIRE NetBox inventory."
+      else
+        echo "Re-discovery filters: site='$SITE' location='$LOCATION' platform='$PLATFORM' device='$DEVICE'"
+      fi
+
+      uv run python discovery.py \
+        --from-netbox \
+        ${SITE:+--filter-site $SITE} \
+        ${LOCATION:+--filter-location $LOCATION} \
+        ${PLATFORM:+--filter-platform $PLATFORM} \
+        ${DEVICE:+--filter-device $DEVICE} \
+        ${COLLECTOR:+--collector "$COLLECTOR"} \
+        ${BRANCH:+--netbox-branch "$BRANCH"} \
+        --save-raw 2>&1 | tee -a "$RAW_DATA_PATH/discovery.log"
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - discovery_output/
+
+# ── Import the whole static inventory (manual) ───────────────────────
+import:all-devices:
+  stage: import
+  rules:
+    - if: '"$[[ inputs.device_name ]]" != ""'
+      when: never
+    # A re-discovery pipeline is about NetBox-sourced hosts; don't also offer
+    # the hosts.yaml import there.
+    - if: '"$[[ inputs.from_netbox ]]" == "true"'
+      when: never
+    - if: '"$[[ inputs.filter_site ]]$[[ inputs.filter_location ]]$[[ inputs.filter_platform ]]$[[ inputs.filter_device ]]" != ""'
+      when: never
+    - if: '$FROM_NETBOX == "true" || $FILTER_SITE || $FILTER_LOCATION || $FILTER_PLATFORM || $FILTER_DEVICE'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: true
+  script:
+    - cd net2sot
+    - |
+      # pipefail: without it `tee` returns 0 and a failed import goes green.
+      set -o pipefail
+      # In-script binding for the same reason as import:new-device above.
+      SITE_NAME="$[[ inputs.site_name ]]"
+      DEVICE_ROLE="$[[ inputs.device_role ]]"
+      COLLECTOR="$[[ inputs.collector ]]"
+      uv run python discovery.py \
+        ${SITE_NAME:+--site-name "$SITE_NAME"} \
+        ${DEVICE_ROLE:+--device-role "$DEVICE_ROLE"} \
+        ${COLLECTOR:+--collector "$COLLECTOR"} \
+        --save-raw 2>&1 | tee -a "$RAW_DATA_PATH/discovery.log"
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - discovery_output/

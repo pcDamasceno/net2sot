@@ -1,0 +1,167 @@
+---
+# NetBox Connection
+netbox_url: "https://netbox.example.com"
+# Secrets come from .env (NETBOX_URL / NETBOX_TOKEN), which is git-ignored, so
+# they never land in version control. Keep the token empty here and set it in
+# .env; a real environment variable still overrides both.
+netbox_token: ""
+netbox_validate_certs: false
+
+# Optional: scope the whole run (reads and writes) to a NetBox branch
+# (netbox-branching plugin) instead of committing to main. The branch must
+# already exist in NetBox; review the diff and merge it there afterwards. Left
+# unset here -- usually passed per run with --netbox-branch or NETBOX_BRANCH.
+# netbox_branch: "rediscovery"
+
+# Discovery Settings
+site_name: "prod"
+# NetBox tenant to own the sites and VRFs discovery creates. Left empty, no
+# tenant is assigned and none is created -- set it only if you actually use
+# NetBox tenancy. Also settable with the TENANT environment variable.
+tenant: ""
+device_role: "unknown"
+debug: true
+
+# Re-point a device that is already in NetBox at the device type this run
+# resolved, so a device created before the mapping knew better (e.g. one stuck
+# on "cisco-generic") gets corrected. Only device_type is touched -- serial,
+# platform, comments, role and site on an existing device are left alone,
+# because they may have been curated by hand and discovery is not the authority
+# on them. Set false (or pass --no-update-existing) for a create-only run.
+update_existing: true
+
+# NAPALM getters to collect
+napalm_getters:
+  - "facts"
+  - "interfaces"
+  - "interfaces_ip"
+
+# VRF-aware IPs. When true (NAPALM collector only), each device's VRF membership
+# is gathered via get_network_instances as its own best-effort getter call, the
+# named VRFs are created in NetBox, and every IP lands in its real VRF instead of
+# all colliding in default_<site>. Turn off to keep the old single-VRF behaviour.
+sync_vrfs: true
+
+# LLDP / Cable Settings
+# Cable creation is off by default: a cable is a physical claim, and LLDP only
+# proves that two ports can hear each other. Turn it on per run (--create-cables
+# / CREATE_CABLES=true) once both ends of the links you care about are in NetBox
+# -- a neighbour whose device is missing is skipped, not cabled.
+create_cables: false
+lldp_enabled: false
+lldp_create_missing_devices: false
+# LLDP heard on a management port comes from the shared OOB/management network
+# (a management switch, or a lab's virtual mgmt bridge), not from a
+# point-to-point link.
+# Set false only if your management ports really are directly cabled.
+lldp_exclude_management: true
+
+# Interface Filtering
+interface_filters:
+  exclude_patterns:
+    - "^Null.*"
+    - "^Embedded.*"
+    - "^unrouted.*"
+    - "^Async.*"
+  include_patterns: []
+  exclude_disabled: true
+
+# Device Type Mapping
+device_type_mapping:
+  cisco:
+    default: "cisco-generic"
+    patterns:
+      - regex: ".*iol.*"
+        type: "cisco_iol"
+
+  arista:
+    default: "arista-generic"
+    patterns:
+      - regex: ".*cEOS.*"
+        type: "ceos"
+  juniper:
+    default: "juniper-generic"
+    patterns:
+      - regex: ".*vMX.*"
+        type: "juniper-vmx"
+
+  nokia:
+    default: "nokia-generic"
+    patterns:
+      # 'show version' reports the chassis as e.g. "7220 IXR-D3L"
+      - regex: ".*IXR-D3L.*"
+        type: "7220-ixr-d3l"
+
+  # Linux servers. When DMI reports the hardware (e.g. "PowerEdge R740") that
+  # model becomes the device type; only a host that tells us nothing usable
+  # (VMs often report placeholders) falls back to this generic default. The key
+  # is matched on the discovered vendor, which is "linux" whenever DMI gave no
+  # real manufacturer.
+  linux:
+    default: "linux-server"
+
+  # Palo Alto firewalls. 'show system info' reports the model (PA-VM, PA-440,
+  # PA-3220) and that becomes the device type as-is; this default only catches a
+  # firewall that reported nothing usable. The key is the discovered vendor,
+  # lowercased -- PAN-OS maps to "Palo Alto Networks".
+  "palo alto networks":
+    default: "paloalto-generic"
+
+  # F5 BIG-IP. 'show sys hardware' reports the marketing name ("BIG-IP Virtual
+  # Edition", "BIG-IP i5800"), which becomes the device type as-is; the default
+  # only catches an appliance that reported nothing usable.
+  "f5 networks":
+    default: "bigip-generic"
+
+
+# Cable defaults
+cable_defaults:
+  status: "connected"
+  type: "cat6"
+
+# Retry settings
+max_retries: 2
+retry_delay: 5
+
+# ── Custom Fields ────────────────────────────────────────────────────
+# NetBox custom fields discovery keeps up to date. For each entry:
+#   enforce_creation -> create the custom-field *definition* in NetBox if it is
+#                       missing, so the field exists before a value is written.
+#   update_existing  -> (over)write the value on the object even when one is
+#                       already set; false fills it only when empty, so a value
+#                       set by hand is preserved.
+# 'source' is the value discovery supplies ("we bring this info") -- e.g.
+# last_synced_at is stamped with the run time on each successful sync.
+custom_fields:
+  - name: last_synced_at
+    label: "Last Synced At"
+    # NetBox custom-field type: text | longtext | date | json | integer | boolean | url | ...
+    type: text
+    # NetBox model(s) the field attaches to (NetBox 4.x: object_types)
+    object_types:
+      - dcim.device
+    description: "Timestamp of the most recent successful discovery sync"
+    source: sync_time
+    enforce_creation: true
+    update_existing: true
+
+  - name: software_version
+    label: "Software Version"
+    type: text
+    object_types:
+      - dcim.device
+    description: "OS/software version discovered on the device"
+    source: os_version
+    enforce_creation: true
+    update_existing: true
+
+  # Add more fields the same way, e.g. structured data carried as JSON:
+  # - name: discovery_metadata
+  #   label: "Discovery Metadata"
+  #   type: json
+  #   object_types:
+  #     - dcim.device
+  #   description: "Facts summary captured on the last discovery"
+  #   source: facts_summary
+  #   enforce_creation: true
+  #   update_existing: false

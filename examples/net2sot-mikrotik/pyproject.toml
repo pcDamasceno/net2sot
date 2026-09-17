@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "net2sot-mikrotik"
+version = "0.1.0"
+description = "MikroTik RouterOS collector plugin for net2sot"
+requires-python = ">=3.10"
+dependencies = [
+    # The contract (net2sot.schemas) and the plugin base classes.
+    "net2sot>=0.1",
+    # This collector's own transport. A plugin brings its own: nothing forces
+    # you onto Netmiko, or onto SSH at all.
+    "nornir-netmiko>=1.0.0",
+]
+
+# This is the whole integration. Once the package is pip-installed,
+# `--collector mikrotik` works and `--list-plugins` shows it; a host on
+# `platform: routeros` is matched automatically even without that flag.
+[project.entry-points."net2sot.collectors"]
+mikrotik = "net2sot_mikrotik.collector:MikroTikCollector"
+
+[tool.setuptools]
+packages = ["net2sot_mikrotik"]

@@ -1,0 +1,120 @@
+---
+ios:
+  platform: ios
+  connection_options:
+    napalm:
+      platform: ios
+    scrapli:
+      platform: cisco_iosxe
+      extras:
+        auth_strict_key: false
+        transport: paramiko
+    netmiko:
+      platform: cisco_ios
+
+eos:
+  platform: eos
+  connection_options:
+    napalm:
+      platform: eos
+    scrapli:
+      platform: arista_eos
+      extras:
+        auth_strict_key: false
+    netmiko:
+      platform: arista_eos
+
+# The NAPALM iosxr driver talks to the router's XML agent, which needs
+# `xml agent tty iteration off` configured on the box. A router that doesn't
+# run it must be collected with --collector scrapli or netmiko instead.
+iosxr:
+  platform: iosxr
+  connection_options:
+    napalm:
+      platform: iosxr
+    scrapli:
+      platform: cisco_iosxr
+      extras:
+        auth_strict_key: false
+    netmiko:
+      platform: cisco_xr
+
+nxos:
+  platform: nxos
+  connection_options:
+    napalm:
+      platform: nxos_ssh
+    scrapli:
+      platform: cisco_nxos
+      extras:
+        auth_strict_key: false
+    netmiko:
+      platform: cisco_nxos
+
+# NAPALM has no SR Linux driver and Scrapli has no parsers for it, so this
+# group pins itself to the netmiko collector via `data.collector`. That lets a
+# mixed inventory run in one pass without --collector.
+srlinux:
+  platform: srlinux
+  data:
+    collector: netmiko
+  connection_options:
+    netmiko:
+      platform: nokia_srl
+      extras:
+        fast_cli: false
+
+# Linux servers over SSH. NAPALM/Scrapli have no Linux driver, so this group
+# pins the netmiko collector via `data.collector`: facts come from raw commands
+# and interfaces/IPs from `ip address show` parsed with ntc-templates. No LLDP
+# (ntc-templates ships no Linux neighbour template).
+linux:
+  platform: linux
+  data:
+    collector: netmiko
+  connection_options:
+    netmiko:
+      platform: linux
+
+# Palo Alto PAN-OS firewalls. Collected by the `paloalto` plugin
+# (net2sot/collectors/paloalto.py), which claims this platform, so no
+# `data.collector` pin is needed -- a host on `platform: paloalto` is matched to
+# it automatically and a mixed inventory still runs in one pass. To use NAPALM
+# instead, install its optional driver (`uv sync --extra panos`) and pin
+# `collector: napalm` here; the napalm options it needs are already below.
+paloalto:
+  platform: paloalto
+  connection_options:
+    napalm:
+      platform: panos
+    netmiko:
+      platform: paloalto_panos
+      extras:
+        # PAN-OS answers the first commands of a session slowly (the CLI sets
+        # scripting-mode and terminal width first); fast_cli would give up on
+        # the prompt before the firewall finished.
+        fast_cli: false
+        # A PAN-OS box prints its first prompt only once the management plane is
+        # ready -- measured at ~23s after login on a PA-VM, past the 20s
+        # netmiko's PAN-OS session_preparation allows, which fails the whole
+        # collection with "Pattern not detected: '[>#]'". This raises the
+        # ceiling on every read of the session; reads still return the moment
+        # the prompt appears, so a healthy firewall is no slower for it.
+        read_timeout_override: 90
+
+# F5 BIG-IP appliances. No NAPALM F5 driver is published on PyPI and
+# ntc-templates has no F5 templates, so tmsh output is parsed by the `f5` plugin
+# (net2sot/collectors/f5.py). It claims this platform, so no
+# `data.collector` pin is needed: a host on `platform: f5` is matched to it
+# automatically.
+f5:
+  platform: f5
+  connection_options:
+    netmiko:
+      # 'f5_tmsh' drops the session straight into tmsh and disables its pager;
+      # plain 'f5' is not a netmiko device_type. There is no napalm or scrapli
+      # entry here because neither ships an F5 driver, which is also why this
+      # group pins its collector.
+      platform: f5_tmsh
+      extras:
+        fast_cli: false

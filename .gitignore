@@ -1,0 +1,28 @@
+# Secrets and local overrides
+.env
+.env.local
+vault_*.yaml
+
+# Local inventories that may carry real hostnames/credentials
+inv_all.yaml
+inv.yaml
+ADMIN_*.md
+
+# Run output
+*.log
+logs/
+discovery_output/
+
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/

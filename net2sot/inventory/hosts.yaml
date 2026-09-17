@@ -1,0 +1,35 @@
+---
+# Example static inventory. Replace these hosts with your own, or skip the file
+# entirely and source the inventory from NetBox with --from-netbox.
+#
+# Each host needs a reachable management address (`hostname`) and a group from
+# inventory/groups.yaml, which supplies the platform and its connection options.
+#
+# DEVICE_USERNAME / DEVICE_PASSWORD override the inventory *defaults* only.
+# A host that pins its own credentials keeps them, which is what lets one
+# run cover devices that don't share a password.
+
+core-rr-01:
+  hostname: 172.20.20.13
+  groups:
+    - ios
+
+pe-emea-01:
+  hostname: 172.20.20.11
+  groups:
+    - eos
+
+pe-emea-02:
+  hostname: 172.20.20.12
+  groups:
+    - eos
+
+ce-custc-01:
+  hostname: 172.20.20.21
+  groups:
+    - srlinux
+
+ce-custc-02:
+  hostname: 172.20.20.22
+  groups:
+    - srlinux

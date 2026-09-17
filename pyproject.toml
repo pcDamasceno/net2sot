@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "net2sot"
+version = "0.1.0"
+description = "Network discovery into your source of truth — a pluggable Nornir pipeline (NetBox today)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Pedro Damasceno", email = "pedro.damasceno19@gmail.com" },
+]
+keywords = [
+    "netbox", "nornir", "napalm", "scrapli", "netmiko",
+    "network-automation", "source-of-truth", "network-discovery",
+]
+dependencies = [
+    "nornir>=3.4.0",
+    "nornir-jinja2>=0.2.0",
+    "nornir-napalm>=0.4.0",
+    "nornir-netbox>=0.3.0",
+    "nornir-scrapli>=2024.1.30",
+    "nornir-utils>=0.2.0",
+    "napalm>=4.0.0",
+    "scrapli[paramiko]>=2024.1.30",
+    "pynetbox>=7.0.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "urllib3>=2.0.0",
+    "nornir-netmiko>=1.0.0",
+    # The discovery contract (net2sot/schemas) that collector and sink
+    # plugins are written against.
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "pytest>=8.0",
+]
+# NAPALM's PAN-OS driver, so a Palo Alto firewall can be collected with NAPALM
+# (`--collector napalm`, or `collector: napalm` on the paloalto group) instead of
+# the Netmiko path that works without it. Kept optional because it is a separate
+# community package that pins lxml<6 for the whole environment.
+#   uv sync --extra panos
+panos = [
+    "napalm-panos>=0.7.0",
+]
+
+# The collectors and sinks this project ships are registered exactly the way a
+# third-party plugin registers itself -- see docs/plugins.md. Nothing about the
+# built-ins is special-cased in the registry, so if the mechanism breaks it
+# breaks for us first.
+[project.entry-points."net2sot.collectors"]
+napalm = "net2sot.collectors.napalm:NapalmCollector"
+scrapli = "net2sot.collectors.scrapli:ScrapliCollector"
+netmiko = "net2sot.collectors.netmiko:NetmikoCollector"
+paloalto = "net2sot.collectors.paloalto:PaloAltoCollector"
+f5 = "net2sot.collectors.f5:F5Collector"
+
+[project.entry-points."net2sot.sinks"]
+netbox = "net2sot.sinks.netbox:NetBoxSink"
+
+[project.urls]
+Repository = "https://github.com/pcDamasceno/net2sot"
+
+[tool.setuptools]
+packages = [
+    "net2sot",
+    "net2sot.tasks",
+    "net2sot.schemas",
+    "net2sot.plugins",
+    "net2sot.collectors",
+    "net2sot.sinks",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# discovery.py runs with net2sot/ as the working directory, so these
+# resolve as top-level modules rather than as a package.
+known-first-party = ["net2sot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
